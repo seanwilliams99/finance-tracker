@@ -642,6 +642,9 @@
 
           <div id="receipt-result" style="display:none;margin-top:16px">
             <div style="font-size:13px;font-weight:600;margin-bottom:10px;color:var(--text)">Extracted Items</div>
+            <div id="receipt-duplicate-warning" style="display:none;background:var(--red-dim);border:1px solid rgba(255,59,48,0.3);border-radius:8px;padding:10px 14px;font-size:12px;margin-bottom:12px">
+              ⚠️ This looks like a receipt you've already added (same store, total, and items) — check before adding it again.
+            </div>
             <div class="user-toggle">
               <div class="user-chip user-chip-sean active" id="rchip-sean" onclick="selectReceiptUser('sean')">👤 Sean</div>
               <div class="user-chip user-chip-partner" id="rchip-partner" onclick="selectReceiptUser('partner')">👤 Partner</div>
@@ -1544,6 +1547,26 @@ function handleReceiptFile(input) {
   if (file) processReceiptFile(file);
 }
 
+// ---- Receipt duplicate detection ----
+// Builds a simple content fingerprint from store name + total + item list, so
+// re-scanning the same receipt (e.g. accidentally uploading it twice) can be flagged
+// before it gets double-logged. Not foolproof (two genuinely identical purchases on
+// the same day would also match), so this warns rather than silently blocking.
+function makeReceiptFingerprint(parsed) {
+  const itemsKey = (parsed.items || [])
+    .map(i => `${i.description.trim().toLowerCase()}:${i.amount}`)
+    .sort()
+    .join('|');
+  return `${(parsed.store || '').trim().toLowerCase()}|${parsed.total || 0}|${itemsKey}`;
+}
+
+function checkDuplicateReceipt(fingerprint) {
+  const warningEl = document.getElementById('receipt-duplicate-warning');
+  if (!fingerprint) { warningEl.style.display = 'none'; return; }
+  const isDuplicate = state.expenses.some(e => e.notes && e.notes.includes('rfp:' + fingerprint));
+  warningEl.style.display = isDuplicate ? 'block' : 'none';
+}
+
 async function processReceiptFile(file) {
   document.getElementById('receipt-result').style.display = 'none';
   document.getElementById('receipt-loading').style.display = 'block';
@@ -1593,6 +1616,8 @@ Include all items with their prices. Use the most appropriate category.` }
       document.getElementById('receipt-total').textContent = fmt(parsed.total || parsed.items?.reduce((s,i)=>s+i.amount,0) || 0);
       window._receiptItems = parsed.items || [];
       window._receiptStore = parsed.store || '';
+      window._receiptFingerprint = makeReceiptFingerprint(parsed);
+      checkDuplicateReceipt(window._receiptFingerprint);
 
     } catch (err) {
       document.getElementById('receipt-loading').style.display = 'none';
@@ -1603,6 +1628,12 @@ Include all items with their prices. Use the most appropriate category.` }
 }
 
 function addReceiptItems() {
+  const fingerprint = window._receiptFingerprint;
+  const isDuplicate = fingerprint && state.expenses.some(e => e.notes && e.notes.includes('rfp:' + fingerprint));
+  if (isDuplicate && !confirm('This looks like the same receipt you already added — same store, total, and items. Add it again anyway?')) {
+    return;
+  }
+
   const checkboxes = document.querySelectorAll('#receipt-items-list input[type=checkbox]:checked');
   const today = new Date().toISOString().split('T')[0];
   checkboxes.forEach(cb => {
@@ -1616,11 +1647,12 @@ function addReceiptItems() {
       date: today,
       category: cat,
       user: receiptUser,
-      notes: 'From receipt scan'
+      notes: 'From receipt scan' + (fingerprint ? ` [rfp:${fingerprint}]` : '')
     });
   });
   save();
   document.getElementById('receipt-result').style.display = 'none';
+  document.getElementById('receipt-duplicate-warning').style.display = 'none';
   document.getElementById('receipt-input').value = '';
   const feedback = document.getElementById('receipt-zone');
   feedback.innerHTML = '<div class="receipt-zone-icon">✅</div><div class="receipt-zone-text"><strong>Items added!</strong> Click to scan another</div>';
