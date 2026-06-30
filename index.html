@@ -283,6 +283,8 @@
   /* Spinner */
   .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.2); border-top-color: currentColor; border-radius: 50%; animation: spin 0.6s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  #refresh-icon { display: inline-block; }
+  #refresh-icon.spinning { animation: spin 0.7s linear infinite; }
 
   /* Month selector */
   .month-nav { display: flex; align-items: center; gap: 12px; }
@@ -493,12 +495,22 @@
           <div class="page-title">Dashboard</div>
           <div class="page-sub" id="dash-subtitle">Overview for this month</div>
         </div>
-        <div class="month-nav">
-          <button onclick="changeMonth(-1)">‹</button>
-          <span class="month-label" id="month-display"></span>
-          <button onclick="changeMonth(1)">›</button>
+        <div class="flex gap-8 items-center">
+          <button class="btn btn-ghost" id="refresh-btn" style="padding:6px 12px;font-size:13px" onclick="manualRefresh()">
+            <span id="refresh-icon">↻</span> Refresh
+          </button>
+          <div class="month-nav">
+            <button onclick="changeMonth(-1)">‹</button>
+            <span class="month-label" id="month-display"></span>
+            <button onclick="changeMonth(1)">›</button>
+          </div>
         </div>
       </div>
+      <div id="dashboard-loading-overlay" style="display:none;text-align:center;padding:60px 20px;color:var(--muted)">
+        <div class="spinner" style="margin:0 auto 12px;width:24px;height:24px;border-width:3px;color:var(--blue)"></div>
+        <div style="font-size:13px">Loading your data from the spreadsheet...</div>
+      </div>
+      <div id="dashboard-content">
 
       <!-- House Hero -->
       <div class="house-hero">
@@ -573,6 +585,7 @@
       <div class="card mt-16" id="dash-savings-card" style="margin-top:16px">
         <div style="font-size:14px;font-weight:700;margin-bottom:12px">💡 Savings Insight</div>
         <div id="dash-insight" style="font-size:13px;color:var(--muted)">Loading...</div>
+      </div>
       </div>
     </div>
 
@@ -744,6 +757,15 @@
         </div>
       </div>
 
+      <!-- ISA / LISA allowance tracker -->
+      <div class="card mb-16" style="margin-bottom:16px">
+        <div class="flex-between mb-16">
+          <div style="font-size:14px;font-weight:700">🗓️ ISA Allowance — Tax Year <span id="isa-tax-year"></span></div>
+          <div style="font-size:11px;color:var(--muted)">Estimated from monthly contributions · resets 6 April</div>
+        </div>
+        <div id="isa-allowance-tracker"></div>
+      </div>
+
       <div class="grid-2">
         <div>
           <div class="section-title">👤 Sean's Accounts</div>
@@ -763,6 +785,15 @@
         <div class="tip mt-16" style="margin-top:16px;margin-bottom:0">
           <strong>Best Cash ISAs right now (check for updates):</strong> Chip, Trading 212, Moneybox, and Plum regularly offer 4–5%+ on easy-access Cash ISAs. Rates change frequently — always compare on MoneySavingExpert.
         </div>
+      </div>
+
+      <!-- Subscriptions rollup -->
+      <div class="card mt-16" style="margin-top:16px">
+        <div class="flex-between mb-16">
+          <div style="font-size:14px;font-weight:700">🔁 Subscriptions</div>
+          <div style="font-size:11px;color:var(--muted)">Based on items logged under "Subscriptions"</div>
+        </div>
+        <div id="subscriptions-list"></div>
       </div>
     </div>
 
@@ -951,8 +982,8 @@
 // ============================================================
 // GOOGLE AUTH + SHEETS CONFIG
 // ============================================================
-const GOOGLE_CLIENT_ID = '18830059395-56mlr5td7hmmeail6iqajeo7djn1qgho.apps.googleusercontent.com';
-const SPREADSHEET_ID = '1Tzmgy_Bg0uv0eRIbKXOPDneTkVaNw7Hc5l7y--Jcua8';
+const GOOGLE_CLIENT_ID = 'PASTE_YOUR_CLIENT_ID_HERE';
+const SPREADSHEET_ID = 'PASTE_YOUR_SPREADSHEET_ID_HERE';
 const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file';
 
 let tokenClient;
@@ -1038,9 +1069,34 @@ function handleSignOut() {
 async function onSignedIn() {
   document.getElementById('auth-screen').style.display = 'none';
   document.getElementById('app-root').style.display = 'grid';
+  showDashboardLoading(true);
   await fetchUserEmail();
   await loadFromSheet();
   init();
+  showDashboardLoading(false);
+}
+
+function showDashboardLoading(isLoading) {
+  const overlay = document.getElementById('dashboard-loading-overlay');
+  const content = document.getElementById('dashboard-content');
+  if (!overlay || !content) return;
+  overlay.style.display = isLoading ? 'block' : 'none';
+  content.style.display = isLoading ? 'none' : 'block';
+}
+
+// Manual pull from the spreadsheet — lets you fetch your partner's latest
+// changes without a full page reload.
+async function manualRefresh() {
+  const icon = document.getElementById('refresh-icon');
+  const btn = document.getElementById('refresh-btn');
+  icon.classList.add('spinning');
+  btn.disabled = true;
+  await loadFromSheet();
+  // Re-render whichever page is currently active so the refreshed data shows immediately
+  const activePage = document.querySelector('.page.active')?.id?.replace('page-', '');
+  if (activePage) nav(activePage);
+  icon.classList.remove('spinning');
+  btn.disabled = false;
 }
 
 async function fetchUserEmail() {
@@ -1073,39 +1129,61 @@ function tryRestoreSession() {
 const SHEETS_BASE = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}`;
 
 function setSyncStatus(status) {
-  // status: 'synced' | 'syncing' | 'error'
+  // status: 'synced' | 'syncing' | 'error' | 'expired'
   const dots = [document.getElementById('sync-dot'), document.getElementById('sync-dot-2')];
   const labels = [document.getElementById('sync-label'), document.getElementById('sync-label-2')];
-  dots.forEach(d => d && (d.className = 'sync-dot' + (status === 'syncing' ? ' syncing' : status === 'error' ? ' error' : '')));
-  const text = status === 'syncing' ? 'Syncing...' : status === 'error' ? 'Sync failed' : 'Synced to spreadsheet';
-  labels.forEach(l => l && (l.textContent = text));
+  dots.forEach(d => d && (d.className = 'sync-dot' + (status === 'syncing' ? ' syncing' : (status === 'error' || status === 'expired') ? ' error' : '')));
+  const text = status === 'syncing' ? 'Syncing...' : status === 'expired' ? 'Session expired — click to sign in' : status === 'error' ? 'Sync failed' : 'Synced to spreadsheet';
+  labels.forEach(l => {
+    if (!l) return;
+    l.textContent = text;
+    l.style.cursor = status === 'expired' ? 'pointer' : 'default';
+    l.onclick = status === 'expired' ? handleSignIn : null;
+  });
+}
+
+class SheetsApiError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+// Wraps every Sheets API call. On a 401 (expired token), surfaces a clear
+// "session expired" state and prompts re-sign-in rather than a generic failure.
+async function sheetsFetch(url, options = {}) {
+  const r = await fetch(url, {
+    ...options,
+    headers: { Authorization: 'Bearer ' + accessToken, ...(options.headers || {}) }
+  });
+  if (r.status === 401) {
+    setSyncStatus('expired');
+    throw new SheetsApiError(401, 'Session expired');
+  }
+  if (!r.ok) {
+    throw new SheetsApiError(r.status, 'Sheets API error: ' + r.status);
+  }
+  return r;
 }
 
 async function sheetsGet(range) {
-  const r = await fetch(`${SHEETS_BASE}/values/${encodeURIComponent(range)}`, {
-    headers: { Authorization: 'Bearer ' + accessToken }
-  });
-  if (!r.ok) throw new Error('Sheets read failed: ' + r.status);
+  const r = await sheetsFetch(`${SHEETS_BASE}/values/${encodeURIComponent(range)}`);
   const data = await r.json();
   return data.values || [];
 }
 
 async function sheetsPut(range, values) {
-  const r = await fetch(`${SHEETS_BASE}/values/${encodeURIComponent(range)}?valueInputOption=RAW`, {
+  const r = await sheetsFetch(`${SHEETS_BASE}/values/${encodeURIComponent(range)}?valueInputOption=RAW`, {
     method: 'PUT',
-    headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ range, values })
   });
-  if (!r.ok) throw new Error('Sheets write failed: ' + r.status);
   return r.json();
 }
 
 async function sheetsClearAndWrite(sheetName, headerRow, rows) {
   // Clear the whole sheet first then write header + rows, so deletions are reflected
-  await fetch(`${SHEETS_BASE}/values/${encodeURIComponent(sheetName)}:clear`, {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + accessToken }
-  });
+  await sheetsFetch(`${SHEETS_BASE}/values/${encodeURIComponent(sheetName)}:clear`, { method: 'POST' });
   await sheetsPut(`${sheetName}!A1`, [headerRow, ...rows]);
 }
 
@@ -1182,7 +1260,7 @@ async function loadFromSheet() {
     setSyncStatus('synced');
   } catch (err) {
     console.error('Load failed', err);
-    setSyncStatus('error');
+    if (!(err instanceof SheetsApiError && err.status === 401)) setSyncStatus('error');
     document.getElementById('auth-error').textContent = '';
     // If sheet/tabs don't exist yet, fall back to defaults silently
   }
@@ -1229,7 +1307,7 @@ async function saveToSheet() {
     setSyncStatus('synced');
   } catch (err) {
     console.error('Save failed', err);
-    setSyncStatus('error');
+    if (!(err instanceof SheetsApiError && err.status === 401)) setSyncStatus('error');
   }
 }
 
@@ -1675,6 +1753,20 @@ function saveBudget() {
 // ============================================================
 // SAVINGS
 // ============================================================
+// ---- UK tax year helpers (6 April to 5 April) ----
+function ukTaxYearStart(d = new Date()) {
+  const year = d.getMonth() > 2 || (d.getMonth() === 2 && d.getDate() >= 6) ? d.getFullYear() : d.getFullYear() - 1;
+  return new Date(year, 3, 6); // April is month 3 (0-indexed)
+}
+function monthsSinceTaxYearStart(d = new Date()) {
+  const start = ukTaxYearStart(d);
+  return (d.getFullYear() - start.getFullYear()) * 12 + (d.getMonth() - start.getMonth()) + 1;
+}
+function ukTaxYearLabel(d = new Date()) {
+  const start = ukTaxYearStart(d);
+  return `${start.getFullYear()}/${String(start.getFullYear() + 1).slice(2)}`;
+}
+
 function renderSavings() {
   const seanAccounts = state.savings.filter(a => a.user === 'sean');
   const partnerAccounts = state.savings.filter(a => a.user === 'partner');
@@ -1706,6 +1798,9 @@ function renderSavings() {
   document.getElementById('savings-sean-total').textContent = fmt(seanAccounts.reduce((s,a) => s + a.balance, 0));
   document.getElementById('savings-partner-total').textContent = fmt(partnerAccounts.reduce((s,a) => s + a.balance, 0));
 
+  renderIsaAllowanceTracker();
+  renderSubscriptions();
+
   // Interest comparison
   const allWithRate = state.savings.filter(a => a.rate > 0);
   const compEl = document.getElementById('interest-comparison');
@@ -1725,6 +1820,96 @@ function renderSavings() {
       </div>`;
     }).join('');
   }
+}
+
+const ISA_ANNUAL_LIMIT = 20000;
+const LISA_ANNUAL_LIMIT = 4000;
+const LISA_BONUS_RATE = 0.25;
+
+// Estimates this tax year's contributions per ISA/LISA account from its monthly
+// contribution rate. This is necessarily an estimate (we don't track individual
+// deposit dates), so it's labelled as such in the UI.
+function renderIsaAllowanceTracker() {
+  document.getElementById('isa-tax-year').textContent = ukTaxYearLabel();
+  const monthsElapsed = monthsSinceTaxYearStart();
+
+  const byUser = { sean: { isa: 0, lisa: 0, lisaBonus: 0, name: state.settings.name1 }, partner: { isa: 0, lisa: 0, lisaBonus: 0, name: state.settings.name2 } };
+
+  state.savings.forEach(a => {
+    if (!byUser[a.user]) return;
+    const estContributed = Math.min((a.monthly || 0) * monthsElapsed, a.type === 'lisa' ? LISA_ANNUAL_LIMIT : ISA_ANNUAL_LIMIT);
+    if (a.type === 'cash-isa') byUser[a.user].isa += estContributed;
+    if (a.type === 'lisa') {
+      byUser[a.user].lisa += estContributed;
+      byUser[a.user].lisaBonus += estContributed * LISA_BONUS_RATE;
+    }
+  });
+
+  const el = document.getElementById('isa-allowance-tracker');
+  el.innerHTML = Object.values(byUser).map(u => {
+    const isaPct = Math.min(100, (u.isa / ISA_ANNUAL_LIMIT) * 100);
+    const lisaPct = Math.min(100, (u.lisa / LISA_ANNUAL_LIMIT) * 100);
+    const hasLisa = u.lisa > 0;
+    return `
+      <div class="mb-16" style="margin-bottom:18px">
+        <div style="font-size:12px;font-weight:600;margin-bottom:8px">${u.name}</div>
+        <div class="budget-row">
+          <div class="budget-row-header">
+            <div class="budget-cat-name">ISA allowance used (est.)</div>
+            <div class="budget-amounts"><span>${fmt(u.isa)}</span> / ${fmt(ISA_ANNUAL_LIMIT)}</div>
+          </div>
+          <div class="budget-bar"><div class="budget-bar-fill" style="width:${isaPct}%;background:var(--blue)"></div></div>
+        </div>
+        ${hasLisa ? `
+        <div class="budget-row" style="margin-bottom:0">
+          <div class="budget-row-header">
+            <div class="budget-cat-name">LISA allowance used (est.)</div>
+            <div class="budget-amounts"><span>${fmt(u.lisa)}</span> / ${fmt(LISA_ANNUAL_LIMIT)}</div>
+          </div>
+          <div class="budget-bar"><div class="budget-bar-fill" style="width:${lisaPct}%;background:var(--amber)"></div></div>
+          <div style="font-size:11px;color:var(--green);margin-top:6px">⭐ Government bonus earned so far this tax year (est.): <strong>${fmt(u.lisaBonus)}</strong> · up to ${fmt(LISA_ANNUAL_LIMIT * LISA_BONUS_RATE)} available if you use the full allowance</div>
+        </div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+// Sums everything logged under the "subscriptions" category over the last 12 months
+// and projects an annual cost, so recurring spend that's easy to forget about is visible.
+function renderSubscriptions() {
+  const el = document.getElementById('subscriptions-list');
+  const subs = state.expenses.filter(e => e.category === 'subscriptions');
+  if (subs.length === 0) {
+    el.innerHTML = '<div class="empty" style="padding:20px"><div class="empty-icon">🔁</div>No subscription spend logged yet</div>';
+    return;
+  }
+
+  // Group by description (case-insensitive) to spot recurring charges
+  const grouped = {};
+  subs.forEach(e => {
+    const key = e.desc.trim().toLowerCase();
+    if (!grouped[key]) grouped[key] = { desc: e.desc, total: 0, count: 0, lastAmount: e.amount, lastDate: e.date };
+    grouped[key].total += e.amount;
+    grouped[key].count += 1;
+    if (e.date > grouped[key].lastDate) { grouped[key].lastDate = e.date; grouped[key].lastAmount = e.amount; }
+  });
+
+  const items = Object.values(grouped).sort((a,b) => b.lastAmount - a.lastAmount);
+  const monthlyTotal = items.reduce((s,i) => s + i.lastAmount, 0);
+  const annualTotal = monthlyTotal * 12;
+
+  el.innerHTML = items.map(i => `
+    <div class="nw-row">
+      <span style="flex:1;font-size:13px">${i.desc}${i.count > 1 ? ` <span style="color:var(--muted);font-size:11px">(seen ${i.count}x)</span>` : ''}</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text)">${fmt(i.lastAmount)}/mo</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--muted);margin-left:16px">${fmt(i.lastAmount * 12)}/yr</span>
+    </div>
+  `).join('') + `
+    <div class="nw-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px">
+      <span style="flex:1;font-size:13px;font-weight:700">Total</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:var(--amber)">${fmt(monthlyTotal)}/mo</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:var(--amber);margin-left:16px">${fmt(annualTotal)}/yr</span>
+    </div>
+  `;
 }
 
 function openSavingsModal() {
